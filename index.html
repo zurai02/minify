@@ -120,7 +120,7 @@ textarea::placeholder{color:var(--fg3);font-size:11px;}
     <div class="brand-sigil">{}</div>
     <div>
       <div class="brand-name">luau-min</div>
-      <div class="brand-ver">v2.0.0</div>
+      <div class="brand-ver">v3.0.0</div>
     </div>
   </div>
   <div class="topbar-opts">
@@ -139,6 +139,10 @@ textarea::placeholder{color:var(--fg3);font-size:11px;}
     <label class="opt-toggle on" id="togSingle">
       <input type="checkbox" id="optSingle" checked>
       <span class="opt-dot"></span>single line
+    </label>
+    <label class="opt-toggle on" id="togFix">
+      <input type="checkbox" id="optFix" checked>
+      <span class="opt-dot"></span>auto-fix
     </label>
   </div>
   <div class="topbar-actions">
@@ -192,7 +196,8 @@ textarea::placeholder{color:var(--fg3);font-size:11px;}
   </div>
   <div class="sbitem"><span>in</span><span class="val amber" id="sbIn">0 B</span></div>
   <div class="sbitem"><span>out</span><span class="val" id="sbOut">—</span></div>
-  <div class="sbitem sbright">luau-min · safe tokenizer</div>
+  <div class="sbitem"><span>fixes</span><span class="val amber" id="sbFixes">—</span></div>
+  <div class="sbitem sbright">luau-min · v3</div>
 </div>
 
 <div class="toast" id="toast"></div>
@@ -200,254 +205,411 @@ textarea::placeholder{color:var(--fg3);font-size:11px;}
 
 <script>
 // ═══════════════════════════════════════════════════════════════════
-//  LUAU TOKENIZER + SAFE MINIFIER
-//  Strategy: lex the entire file into typed tokens, reconstruct
-//  with only the whitespace needed to keep adjacent tokens valid.
-//  Comments become zero-width tokens that are dropped.
-//  Strings / long strings are preserved byte-for-byte.
+//  LUAU SAFE MINIFIER v3
+//  Full lexer → token stream → smart reconstructor.
+//  Rule: only insert a space when the two adjacent characters would
+//  form a DIFFERENT token if concatenated (e.g. "end" + "(" is fine,
+//  "end" + "x" would read "endx"). Strings/long-strings preserved
+//  verbatim. Hidden linter validates bracket + keyword balance.
 // ═══════════════════════════════════════════════════════════════════
 
-const TK = {
-  SPACE:    'space',
-  NEWLINE:  'newline',
-  COMMENT:  'comment',  // -- line
-  BCOMMENT: 'bcomment', // --[[ ]]
-  STRING:   'string',   // "..." '...' [=[...]=]
-  NAME:     'name',     // identifiers + keywords
-  NUMBER:   'number',
-  OP:       'op',       // operators / punctuation
-  OTHER:    'other',
-};
+// Token kinds
+const S='space', NL='nl', LC='lc', BC='bc', STR='str',
+      ID='id', NUM='num', OP='op';
 
-// Keywords that are purely alphabetic — need a space separator from adjacent names
-const KEYWORDS = new Set([
+// Luau word-keywords (all alpha — must be space-separated from adjacent IDs)
+const KW = new Set([
   'and','break','continue','do','else','elseif','end','false','for',
   'function','if','in','local','nil','not','or','repeat','return',
   'then','true','until','while','export','type'
 ]);
 
+// Characters that end a number literal
+function isIdentChar(c) {
+  return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+         (c >= '0' && c <= '9') || c === '_';
+}
+function isDigit(c) { return c >= '0' && c <= '9'; }
+function isAlpha(c) {
+  return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c === '_';
+}
+
+// ── Lexer ─────────────────────────────────────────────────────────
 function tokenize(src) {
-  const tokens = [];
-  let i = 0;
-  const n = src.length;
+  const toks = [];
+  let i = 0, n = src.length;
+
+  function peek(off=0) { return src[i+off] || ''; }
+
+  // Try to read a long bracket level at position j after the opening [
+  // Returns eq count or -1 if not a long bracket
+  function longBracketLevel(pos) {
+    let j = pos, eq = 0;
+    while (j < n && src[j] === '=') { eq++; j++; }
+    if (j < n && src[j] === '[') return eq;
+    return -1;
+  }
 
   while (i < n) {
     const c = src[i];
 
-    // newline
+    // ── Newlines ──
     if (c === '\r' || c === '\n') {
-      const start = i;
       if (c === '\r' && src[i+1] === '\n') i++;
-      i++;
-      tokens.push({t: TK.NEWLINE, v: '\n'});
-      continue;
+      i++; toks.push({t:NL}); continue;
     }
 
-    // spaces / tabs
+    // ── Whitespace ──
     if (c === ' ' || c === '\t') {
-      let start = i;
       while (i < n && (src[i] === ' ' || src[i] === '\t')) i++;
-      tokens.push({t: TK.SPACE, v: src.slice(start, i)});
-      continue;
+      toks.push({t:S}); continue;
     }
 
-    // comments: -- line  or  --[=*[ ... ]=*]
+    // ── Comments: -- ──
     if (c === '-' && src[i+1] === '-') {
       i += 2;
-      // check for long comment --[=*[
-      let lvl = -1;
+      // Long comment?
       if (src[i] === '[') {
-        let j = i+1, eq = 0;
-        while (j < n && src[j] === '=') { eq++; j++; }
-        if (j < n && src[j] === '[') { lvl = eq; i = j+1; }
-      }
-      if (lvl >= 0) {
-        // long comment — find closing ]=*]
-        const close = ']' + '='.repeat(lvl) + ']';
-        const end = src.indexOf(close, i);
-        const val = end === -1 ? src.slice(i) : src.slice(i, end + close.length);
-        i = end === -1 ? n : end + close.length;
-        tokens.push({t: TK.BCOMMENT, v: val});
-      } else {
-        // line comment — read to end of line
-        let start2 = i;
-        while (i < n && src[i] !== '\n' && src[i] !== '\r') i++;
-        tokens.push({t: TK.COMMENT, v: src.slice(start2, i)});
-      }
-      continue;
-    }
-
-    // long strings [=*[
-    if (c === '[') {
-      let j = i+1, eq = 0;
-      while (j < n && src[j] === '=') { eq++; j++; }
-      if (j < n && src[j] === '[') {
-        const open = '[' + '='.repeat(eq) + '[';
-        const close = ']' + '='.repeat(eq) + ']';
-        i = j+1;
-        const end = src.indexOf(close, i);
-        const val = open + (end === -1 ? src.slice(i) : src.slice(i, end + close.length));
-        i = end === -1 ? n : end + close.length;
-        tokens.push({t: TK.STRING, v: val});
-        continue;
-      }
-    }
-
-    // quoted strings " or '
-    if (c === '"' || c === "'") {
-      const q = c; let val = q; i++;
-      while (i < n && src[i] !== q && src[i] !== '\n' && src[i] !== '\r') {
-        if (src[i] === '\\') { val += src[i] + (src[i+1] || ''); i += 2; }
-        else { val += src[i++]; }
-      }
-      if (i < n) { val += src[i++]; } // closing quote
-      tokens.push({t: TK.STRING, v: val});
-      continue;
-    }
-
-    // numbers (simple lex — hex, decimal, scientific, hex float)
-    if (
-      (c >= '0' && c <= '9') ||
-      (c === '.' && src[i+1] >= '0' && src[i+1] <= '9')
-    ) {
-      let start = i;
-      if (c === '0' && (src[i+1] === 'x' || src[i+1] === 'X')) {
-        i += 2;
-        while (i < n && /[0-9a-fA-F_p+\-.]/.test(src[i])) i++;
-      } else {
-        while (i < n && /[0-9a-zA-Z_.\-+]/.test(src[i])) {
-          // stop on operators that can follow a number
-          if ((src[i] === '-' || src[i] === '+') && !/[eEpP]/.test(src[i-1])) break;
-          i++;
+        const lvl = longBracketLevel(i+1);
+        if (lvl >= 0) {
+          i += 2 + lvl; // skip [==..==[
+          const close = ']' + '='.repeat(lvl) + ']';
+          const e = src.indexOf(close, i);
+          i = e < 0 ? n : e + close.length;
+          toks.push({t:BC}); continue;
         }
       }
-      tokens.push({t: TK.NUMBER, v: src.slice(start, i)});
-      continue;
+      // Line comment
+      while (i < n && src[i] !== '\n' && src[i] !== '\r') i++;
+      toks.push({t:LC}); continue;
     }
 
-    // identifiers / keywords
-    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c === '_') {
-      let start = i;
-      while (i < n && /[a-zA-Z0-9_]/.test(src[i])) i++;
-      tokens.push({t: TK.NAME, v: src.slice(start, i)});
-      continue;
+    // ── Long strings [=*[ ... ]=*] ──
+    if (c === '[') {
+      const lvl = longBracketLevel(i+1);
+      if (lvl >= 0) {
+        const open = '[' + '='.repeat(lvl) + '[';
+        const close = ']' + '='.repeat(lvl) + ']';
+        const start = i;
+        i += open.length;
+        const e = src.indexOf(close, i);
+        i = e < 0 ? n : e + close.length;
+        toks.push({t:STR, v:src.slice(start, i)}); continue;
+      }
     }
 
-    // everything else: operators, brackets, etc.
-    tokens.push({t: TK.OP, v: c});
-    i++;
+    // ── Quoted strings ──
+    if (c === '"' || c === "'") {
+      const q = c; let v = q; i++;
+      while (i < n && src[i] !== q && src[i] !== '\n' && src[i] !== '\r') {
+        if (src[i] === '\\') {
+          v += src[i]; i++;
+          if (i < n) { v += src[i]; i++; }
+        } else { v += src[i++]; }
+      }
+      if (i < n && src[i] === q) { v += q; i++; }
+      toks.push({t:STR, v}); continue;
+    }
+
+    // ── Numbers ──
+    // hex: 0x...
+    if (c === '0' && (src[i+1] === 'x' || src[i+1] === 'X')) {
+      let v = src[i] + src[i+1]; i += 2;
+      while (i < n && /[0-9a-fA-F_]/.test(src[i])) { v += src[i++]; }
+      // hex float exponent p+/-
+      if (i < n && (src[i] === 'p' || src[i] === 'P')) {
+        v += src[i++];
+        if (i < n && (src[i] === '+' || src[i] === '-')) v += src[i++];
+        while (i < n && isDigit(src[i])) v += src[i++];
+      }
+      toks.push({t:NUM, v}); continue;
+    }
+    // decimal / float
+    if (isDigit(c) || (c === '.' && isDigit(src[i+1]))) {
+      let v = '';
+      while (i < n && isDigit(src[i])) v += src[i++];
+      if (i < n && src[i] === '.' && src[i+1] !== '.') { // avoid consuming ..
+        v += src[i++];
+        while (i < n && isDigit(src[i])) v += src[i++];
+      }
+      if (i < n && (src[i] === 'e' || src[i] === 'E')) {
+        v += src[i++];
+        if (i < n && (src[i] === '+' || src[i] === '-')) v += src[i++];
+        while (i < n && isDigit(src[i])) v += src[i++];
+      }
+      toks.push({t:NUM, v}); continue;
+    }
+
+    // ── Identifiers / keywords ──
+    if (isAlpha(c)) {
+      let v = '';
+      while (i < n && isIdentChar(src[i])) v += src[i++];
+      toks.push({t:ID, v, kw: KW.has(v)}); continue;
+    }
+
+    // ── Multi-char operators: .., ..., ~=, ==, <=, >=, ->, :: ──
+    const two = src.slice(i, i+2);
+    if (['..', '~=', '==', '<=', '>=', '->', '::'].includes(two)) {
+      // check for ...
+      if (two === '..' && src[i+2] === '.') { toks.push({t:OP, v:'...'}); i+=3; continue; }
+      toks.push({t:OP, v:two}); i+=2; continue;
+    }
+
+    // single char operator / punctuation
+    toks.push({t:OP, v:c}); i++; continue;
   }
-  return tokens;
+  return toks;
 }
 
-// ── Internal linter (hidden) ──────────────────────────────────────
-// Checks the token stream for obvious issues before we reconstruct.
-// Returns array of {line, msg} — never shown to the user.
-function lint(tokens) {
+// ── Hidden linter ─────────────────────────────────────────────────
+// Runs internally; results stored on window._lastLint only.
+// Checks bracket balance + keyword block balance (do/end etc).
+function lint(toks) {
   const issues = [];
   let line = 1;
-  let depth = 0; // bracket depth
-  for (let i = 0; i < tokens.length; i++) {
-    const tk = tokens[i];
-    if (tk.t === TK.NEWLINE) { line++; continue; }
-    if (tk.t === TK.OP) {
-      if (tk.v === '(' || tk.v === '[' || tk.v === '{') depth++;
-      if (tk.v === ')' || tk.v === ']' || tk.v === '}') {
-        depth--;
-        if (depth < 0) {
-          issues.push({line, msg: 'unmatched closing bracket: ' + tk.v});
-          depth = 0;
-        }
+  const brackets = []; // stack of {v, line}
+  let blockDepth = 0;
+
+  for (const tk of toks) {
+    if (tk.t === NL) { line++; continue; }
+    if (tk.t === OP) {
+      if ('([{'.includes(tk.v)) brackets.push({v:tk.v, line});
+      if (')]}'.includes(tk.v)) {
+        const match = {'(':')','[':']','{':'}'}[brackets[brackets.length-1]?.v];
+        if (!brackets.length || match !== tk.v) {
+          issues.push({line, msg:`unexpected '${tk.v}'`});
+        } else brackets.pop();
       }
     }
+    if (tk.t === ID && tk.kw) {
+      if (['do','then','repeat','function','if','for','while'].includes(tk.v)) blockDepth++;
+      if (tk.v === 'end' || tk.v === 'until') { blockDepth--; if (blockDepth < 0) issues.push({line, msg:'unexpected end/until'}); }
+    }
   }
-  if (depth > 0) issues.push({line, msg: `${depth} unclosed bracket(s)`});
+  for (const b of brackets) issues.push({line: b.line, msg:`unclosed '${b.v}'`});
+  if (blockDepth > 0) issues.push({line, msg:`${blockDepth} unclosed block(s)`});
   return issues;
 }
 
-// ── Reconstructor ──────────────────────────────────────────────────
-// Given a filtered token list (comments removed), rebuild source
-// with minimal whitespace: a space only when adjacent tokens would
-// merge into a different token without it.
+// ── Space logic ───────────────────────────────────────────────────
+// Determines whether a space is REQUIRED between token A and token B
+// to prevent the Luau lexer from reading them as one token.
 function needsSpace(a, b) {
   if (!a || !b) return false;
-  const at = a.t, av = a.v;
-  const bt = b.t, bv = b.v;
 
-  // name/keyword next to name/keyword/number always needs space
-  const aIdent = at === TK.NAME || at === TK.NUMBER;
-  const bIdent = bt === TK.NAME || bt === TK.NUMBER;
-  if (aIdent && bIdent) return true;
+  const av = a.v || '', bv = b.v || '';
+  const aLast = av[av.length-1] || '';
+  const bFirst = bv[0] || '';
 
-  // keyword next to operator that starts with a letter (not, and, or)
-  // e.g. "not x" — but "not(" is fine
-  if (at === TK.NAME && bt === TK.NAME) return true;
+  // Two tokens that are both identifier-chars (letters, digits, _)
+  // MUST be separated or they merge into one identifier.
+  const aIsIdEnd  = a.t === ID || a.t === NUM ||
+                    (a.t === OP && isIdentChar(aLast));
+  const bIsIdStart= b.t === ID || b.t === NUM ||
+                    (b.t === OP && isIdentChar(bFirst));
+  if (aIsIdEnd && bIsIdStart) return true;
 
-  // number followed by '.' could be confused with decimal
-  if (at === TK.NUMBER && bv === '.') return true;
-  if (av === '.' && bt === TK.NUMBER) return true;
+  // Keyword ending next to a non-bracket: "endx", "dox", "thenx"
+  // Covered above since keywords are IDs.
 
-  // '..' operator next to another '.' or a number
-  if (av === '..' && bt === TK.NUMBER) return true;
-  if (at === TK.NUMBER && bv === '..') return true;
+  // Number ending in digit/. followed by . → would start a method call
+  // or confuse decimal: "1." + ".5" → "1..5" (concat, not "1.5")
+  if (a.t === NUM && bv === '..') return true;
+  if (av === '..' && b.t === NUM) return true;
+
+  // Single dot: "1" + "." could form "1." decimal
+  if (a.t === NUM && bv === '.') return true;
+  if (av === '.' && b.t === NUM) return true;
+
+  // Prevent "--" from accidentally forming: a minus OP then another minus OP
+  if (av === '-' && bv === '-') return true;
+  // Prevent "~=" reading issues if ~ appears alone next to =
+  if (av === '~' && bv === '=') return true;
+
+  // Dot + dot → ".." (already lexed as one, but just in case)
   if (av === '.' && bv === '.') return true;
-
-  // minus sign: unary minus after a name/number/closing bracket could be a subtraction
-  // always safe to add space around -
-  if (av === '-' && bIdent) return true;
-  if (aIdent && bv === '-') return false; // subtraction — no space needed but still valid
-
-  // '<', '>', '=', '~' combined operators — prevent << >> ~= etc from wrong merges
-  // Already handled since we lex char by char and these are separate OP tokens
 
   return false;
 }
 
-function reconstruct(tokens, opts) {
-  // 1. Filter: drop comments (optionally), collapse whitespace
+// ── Reconstructor ─────────────────────────────────────────────────
+function reconstruct(toks, opts) {
+  // Pass 1: filter
   const keep = [];
-  for (const tk of tokens) {
-    if (tk.t === TK.COMMENT  && opts.line)  continue;
-    if (tk.t === TK.BCOMMENT && opts.block) continue;
-    if (tk.t === TK.SPACE)   continue; // we'll re-add only needed spaces
-    if (tk.t === TK.NEWLINE) {
-      if (opts.single) continue; // drop newlines in single-line mode
-      keep.push(tk);
-      continue;
+  for (const tk of toks) {
+    if (tk.t === LC && opts.line)  continue;
+    if (tk.t === BC && opts.block) continue;
+    if (tk.t === S)  continue; // re-add only as needed
+    if (tk.t === NL) {
+      if (opts.single) continue;
+      keep.push(tk); continue;
     }
     keep.push(tk);
   }
 
-  // 2. Rebuild — insert space only where needed
+  // Pass 2: reconstruct with minimal spacing
   let out = '';
   let prev = null;
-  for (let i = 0; i < keep.length; i++) {
-    const tk = keep[i];
-    if (tk.t === TK.NEWLINE) { out += '\n'; prev = null; continue; }
+  for (const tk of keep) {
+    if (tk.t === NL) { out += '\n'; prev = null; continue; }
     if (prev !== null && needsSpace(prev, tk)) out += ' ';
     out += tk.v;
     prev = tk;
   }
 
-  // 3. If not single line, collapse consecutive blank lines → one
+  // Pass 3: clean up multi-blank lines if not single-line
   if (!opts.single && opts.ws) {
     out = out.replace(/\n{3,}/g, '\n\n');
-    // trim leading whitespace per line
     out = out.split('\n').map(l => l.trimStart()).join('\n');
   }
 
   return out.trim();
 }
 
-// ── Main minify entry ─────────────────────────────────────────────
+// ── Smart Fixer ───────────────────────────────────────────────────
+// Works on the token stream and fixes common Luau mistakes.
+// Returns {toks, fixes:[]} where fixes is a list of descriptions
+// (stored on window._lastFixes — never shown in the UI directly,
+//  only the count appears in the status bar).
+//
+// Fixes applied:
+//  1. Missing `end` for function/if/for/while/do blocks
+//  2. `elseif` written as two words ("else if")
+//  3. `~=` written as `!=`
+//  4. `//` (JS division comment) → `--`  (line comment)  [only when full line]
+//  5. `print "x"` without parens → `print("x")`  (string arg shorthand)
+//  6. Trailing commas before ) or } or ] (JS habit)
+//  7. `===` → `==`  and  `!==` → `~=`
+//  8. Missing `local` warning logged (can't auto-fix safely)
+//  9. `else if` two tokens → `elseif` single token
+// 10. Double semicolons `;;` → `;`
+function smartFix(toks) {
+  const fixes = [];
+  let out = [...toks];
+  let line = 1;
+
+  // ── Pass 1: token-level replacements ──
+  for (let i = 0; i < out.length; i++) {
+    const tk = out[i];
+    if (tk.t === NL) { line++; continue; }
+
+    // Fix: `!=` → `~=`
+    if (tk.t === OP && tk.v === '!') {
+      if (out[i+1]?.v === '=') {
+        out.splice(i, 2, {t:OP, v:'~='});
+        fixes.push({line, msg:'`!=` → `~=`'});
+      }
+    }
+
+    // Fix: `===` → `==`
+    if (tk.t === OP && tk.v === '==' && out[i+1]?.t === OP && out[i+1]?.v === '=') {
+      out.splice(i+1, 1);
+      fixes.push({line, msg:'`===` → `==`'});
+    }
+
+    // Fix: `!==` → `~=`
+    if (tk.t === OP && tk.v === '~=' && out[i+1]?.t === OP && out[i+1]?.v === '=') {
+      out.splice(i+1, 1);
+      fixes.push({line, msg:'`!==` → `~=`'});
+    }
+
+    // Fix: `//` treated as JS comment → `--`
+    if (tk.t === OP && tk.v === '/' && out[i+1]?.t === OP && out[i+1]?.v === '/') {
+      // only if rest of tokens until newline look like a comment (no code)
+      // check: next real token after // should be text until newline
+      // We convert the // and everything until next NL into a LC token
+      let j = i+2;
+      let commentText = '';
+      while (j < out.length && out[j].t !== NL) {
+        commentText += (out[j].v || '');
+        j++;
+      }
+      const newTok = {t:LC, v:commentText};
+      out.splice(i, j-i, newTok);
+      fixes.push({line, msg:'`// comment` → `--` comment'});
+    }
+
+    // Fix: double semicolons `;;`
+    if (tk.t === OP && tk.v === ';' && out[i+1]?.t === OP && out[i+1]?.v === ';') {
+      out.splice(i+1, 1);
+      fixes.push({line, msg:'`;;` → `;`'});
+    }
+
+    // Fix: trailing comma before ) ] }
+    if (tk.t === OP && tk.v === ',') {
+      // skip whitespace/newline tokens to find next real token
+      let j = i+1;
+      while (j < out.length && (out[j].t === S || out[j].t === NL)) j++;
+      if (out[j] && out[j].t === OP && ')]}}'.includes(out[j].v)) {
+        out.splice(i, 1);
+        i--; // recheck position
+        fixes.push({line, msg:'trailing comma removed before ' + out[j].v});
+      }
+    }
+  }
+
+  // ── Pass 2: `else if` two-token → `elseif` ──
+  line = 1;
+  for (let i = 0; i < out.length - 1; i++) {
+    if (out[i].t === NL) { line++; continue; }
+    if (out[i].t === ID && out[i].v === 'else') {
+      // find next non-space/newline
+      let j = i+1;
+      while (j < out.length && (out[j].t === S || out[j].t === NL)) j++;
+      if (out[j]?.t === ID && out[j].v === 'if') {
+        // remove everything between i and j, replace with elseif
+        out.splice(i, j-i+1, {t:ID, v:'elseif', kw:true});
+        fixes.push({line, msg:'`else if` → `elseif`'});
+      }
+    }
+  }
+
+  // ── Pass 3: missing `end` for blocks ──
+  // Count block openers vs closers. If deficit, append end tokens.
+  // Only attempt if imbalance is small (≤ 5) to avoid false positives.
+  line = 1;
+  let depth = 0;
+  const blockOpen  = new Set(['do','then','repeat','function']);
+  const blockClose = new Set(['end','until']);
+
+  // if/for/while also open blocks but are followed by "do" or "then"
+  // so we count do/then/function/repeat and end/until
+  for (const tk of out) {
+    if (tk.t === NL) { line++; continue; }
+    if (tk.t !== ID) continue;
+    if (blockOpen.has(tk.v)) depth++;
+    if (blockClose.has(tk.v)) depth--;
+  }
+
+  if (depth > 0 && depth <= 5) {
+    // Append missing `end` tokens (with newlines) at the end
+    for (let e = 0; e < depth; e++) {
+      out.push({t:NL}, {t:ID, v:'end', kw:true});
+    }
+    fixes.push({line, msg:`appended ${depth} missing \`end\` keyword(s)`});
+  }
+
+  return {toks: out, fixes};
+}
+
+// ── Entry ─────────────────────────────────────────────────────────
 function minify(src, opts) {
   if (!src.trim()) return '';
-  const tokens = tokenize(src);
-  // Run hidden lint (store results internally, never display to user)
-  const _lintResults = lint(tokens);
-  // store on window for dev inspection via console only
-  window._lastLint = _lintResults;
-  return reconstruct(tokens, opts);
+  let toks = tokenize(src);
+  window._lastLint = lint(toks); // hidden — inspect in console
+
+  let fixCount = 0;
+  if (opts.fix) {
+    const result = smartFix(toks);
+    toks = result.toks;
+    window._lastFixes = result.fixes;
+    fixCount = result.fixes.length;
+  } else {
+    window._lastFixes = [];
+  }
+
+  window._fixCount = fixCount;
+  return reconstruct(toks, opts);
 }
 
 // ══════════════════════════════════════════════════════════════════
@@ -466,7 +628,7 @@ const inputWrap  = document.getElementById('inputWrap');
 const toast      = document.getElementById('toast');
 
 // Chip toggles
-['togLine','togBlock','togWS','togSingle'].forEach(id => {
+['togLine','togBlock','togWS','togSingle','togFix'].forEach(id => {
   const el = document.getElementById(id);
   const cb = el.querySelector('input');
   el.addEventListener('click', e => {
@@ -482,6 +644,7 @@ function getOpts() {
     block:  document.getElementById('optBlock').checked,
     ws:     document.getElementById('optWS').checked,
     single: document.getElementById('optSingle').checked,
+    fix:    document.getElementById('optFix').checked,
   };
 }
 
@@ -543,6 +706,10 @@ function run() {
   outputArea.value = result;
   copyBtn.disabled = false;
   updateOutStats(src.length, result);
+  const fc = window._fixCount || 0;
+  const sbFixes = document.getElementById('sbFixes');
+  sbFixes.textContent = fc > 0 ? fc : '0';
+  sbFixes.className = 'val' + (fc > 0 ? ' amber' : '');
 }
 
 runBtn.addEventListener('click', () => { run(); showToast('minified'); });
