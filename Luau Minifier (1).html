@@ -1,0 +1,686 @@
+<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#fff;color:#000}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
+<title>Luau Minifier</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+
+<style>
+/*
+  Dark-first. Terminal aesthetic — IBM Plex Mono throughout, sharp edges,
+  amber accent like an old CRT. Light mode flips to paper.
+*/
+:root {
+  --bg:        #0b0c0f;
+  --bg2:       #111318;
+  --bg3:       #181b22;
+  --line:      #1e2129;
+  --fg:        #d4d8e8;
+  --fg2:       #6b7192;
+  --fg3:       #3a3f58;
+  --amber:     #f0a500;
+  --amber-dim: rgba(240,165,0,0.10);
+  --amber-glow:rgba(240,165,0,0.22);
+  --green:     #39c778;
+  --red:       #e05555;
+  --mono: 'IBM Plex Mono', 'Courier New', monospace;
+  --sans: 'IBM Plex Sans', system-ui, sans-serif;
+  color-scheme: dark;
+}
+
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --bg:        #f6f4ee;
+    --bg2:       #ede9e0;
+    --bg3:       #e4e0d5;
+    --line:      #ccc8bc;
+    --fg:        #1c1a14;
+    --fg2:       #6b6558;
+    --fg3:       #a09a8e;
+    --amber:     #c07800;
+    --amber-dim: rgba(192,120,0,0.08);
+    --amber-glow:rgba(192,120,0,0.18);
+    --green:     #1a7a44;
+    --red:       #b83232;
+    color-scheme: light;
+  }
+}
+:root[data-theme="light"] {
+  --bg:        #f6f4ee;
+  --bg2:       #ede9e0;
+  --bg3:       #e4e0d5;
+  --line:      #ccc8bc;
+  --fg:        #1c1a14;
+  --fg2:       #6b6558;
+  --fg3:       #a09a8e;
+  --amber:     #c07800;
+  --amber-dim: rgba(192,120,0,0.08);
+  --amber-glow:rgba(192,120,0,0.18);
+  --green:     #1a7a44;
+  --red:       #b83232;
+  color-scheme: light;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  height: 100%;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+  padding-left: max(0px, env(safe-area-inset-left, 0px));
+  padding-right: max(0px, env(safe-area-inset-right, 0px));
+  padding-block: 0;
+}
+
+/* ── Topbar ── */
+.topbar {
+  display: flex;
+  align-items: stretch;
+  border-bottom: 1px solid var(--line);
+  flex-shrink: 0;
+  background: var(--bg2);
+}
+
+.topbar-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 20px;
+  border-right: 1px solid var(--line);
+}
+
+.brand-sigil {
+  font-family: var(--mono);
+  font-weight: 600;
+  font-size: 18px;
+  color: var(--amber);
+  letter-spacing: -1px;
+  line-height: 1;
+  padding: 12px 0;
+}
+
+.brand-name {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--fg);
+}
+
+.brand-ver {
+  font-size: 10px;
+  color: var(--fg3);
+  letter-spacing: 0.08em;
+  margin-top: 1px;
+}
+
+.topbar-opts {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  flex: 1;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.topbar-opts::-webkit-scrollbar { display: none; }
+
+.opt-toggle {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 16px;
+  height: 100%;
+  border-right: 1px solid var(--line);
+  cursor: pointer;
+  user-select: none;
+  color: var(--fg2);
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  transition: color 0.1s, background 0.1s;
+  white-space: nowrap;
+}
+.opt-toggle:hover { background: var(--bg3); color: var(--fg); }
+.opt-toggle.on { color: var(--amber); }
+.opt-toggle input { display: none; }
+
+.opt-dot {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--fg3);
+  transition: background 0.1s;
+  flex-shrink: 0;
+}
+.opt-toggle.on .opt-dot { background: var(--amber); }
+
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  margin-left: auto;
+}
+
+.tbtn {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 18px;
+  height: 100%;
+  border: none;
+  border-left: 1px solid var(--line);
+  background: transparent;
+  color: var(--fg2);
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: color 0.1s, background 0.1s;
+  white-space: nowrap;
+}
+.tbtn:hover { background: var(--bg3); color: var(--fg); }
+.tbtn:active { background: var(--amber-dim); }
+.tbtn.primary { color: var(--amber); }
+.tbtn.primary:hover { background: var(--amber-dim); }
+.tbtn svg { width: 13px; height: 13px; flex-shrink: 0; }
+
+/* ── Split layout ── */
+.workspace {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  min-height: 0;
+  overflow: hidden;
+}
+
+@media (max-width: 640px) {
+  .workspace { grid-template-columns: 1fr; grid-template-rows: 1fr 1fr; }
+}
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  position: relative;
+}
+
+.panel + .panel { border-left: 1px solid var(--line); }
+
+/* Panel label row */
+.panel-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 14px;
+  background: var(--bg2);
+  border-bottom: 1px solid var(--line);
+  flex-shrink: 0;
+}
+
+.panel-label {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--fg3);
+}
+
+.panel-stats {
+  font-size: 10px;
+  color: var(--fg3);
+  letter-spacing: 0.02em;
+  font-variant-numeric: tabular-nums;
+}
+
+.panel-stats .hi { color: var(--fg2); }
+
+/* Editor */
+.editor-wrap {
+  flex: 1;
+  position: relative;
+  min-height: 0;
+  display: flex;
+}
+
+/* Line numbers */
+.gutter {
+  width: 42px;
+  flex-shrink: 0;
+  background: var(--bg2);
+  border-right: 1px solid var(--line);
+  overflow: hidden;
+  padding-top: 14px;
+  text-align: right;
+  padding-right: 8px;
+  font-size: 11px;
+  line-height: 1.65;
+  color: var(--fg3);
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+}
+
+textarea {
+  flex: 1;
+  min-width: 0;
+  padding: 14px 14px;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.65;
+  border: none;
+  outline: none;
+  resize: none;
+  tab-size: 2;
+  white-space: pre;
+  overflow-wrap: normal;
+  overflow-x: auto;
+}
+
+.panel:last-child textarea {
+  background: var(--bg2);
+  color: var(--fg);
+}
+
+textarea::placeholder {
+  color: var(--fg3);
+  font-size: 11px;
+}
+
+/* Drop overlay */
+.drop-overlay {
+  position: absolute;
+  inset: 0;
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: color-mix(in srgb, var(--bg) 85%, transparent);
+  border: 1px dashed var(--amber);
+  z-index: 10;
+  pointer-events: none;
+}
+.drop-overlay.active { display: flex; }
+.drop-icon { font-size: 28px; color: var(--amber); opacity: 0.7; line-height: 1; }
+.drop-label { font-size: 13px; font-weight: 600; color: var(--amber); letter-spacing: 0.05em; }
+.drop-sub { font-size: 11px; color: var(--fg2); }
+
+/* Bottom status bar */
+.statusbar {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  border-top: 1px solid var(--line);
+  background: var(--bg2);
+  flex-shrink: 0;
+  height: 26px;
+  overflow: hidden;
+}
+
+.sbitem {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 12px;
+  height: 100%;
+  border-right: 1px solid var(--line);
+  font-size: 10px;
+  color: var(--fg3);
+  letter-spacing: 0.03em;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.sbitem .val { color: var(--fg2); }
+.sbitem .val.green { color: var(--green); }
+.sbitem .val.amber { color: var(--amber); }
+
+.sbright { margin-left: auto; }
+
+/* ── Reduction meter ── */
+.meter-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 14px;
+  height: 100%;
+  border-right: 1px solid var(--line);
+}
+
+.meter-track {
+  width: 80px;
+  height: 4px;
+  background: var(--line);
+  border-radius: 0;
+  overflow: hidden;
+}
+.meter-fill {
+  height: 100%;
+  background: var(--green);
+  width: 0%;
+  transition: width 0.3s;
+}
+.meter-pct { font-size: 10px; color: var(--green); min-width: 36px; font-variant-numeric: tabular-nums; }
+
+/* ── Toast ── */
+.toast {
+  position: fixed;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%) translateY(48px);
+  background: var(--bg3);
+  border: 1px solid var(--line);
+  color: var(--fg);
+  padding: 7px 16px;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  opacity: 0;
+  transition: transform 0.18s, opacity 0.18s;
+  z-index: 200;
+  pointer-events: none;
+  white-space: nowrap;
+}
+.toast.show { transform: translateX(-50%) translateY(0); opacity: 1; }
+
+#fileInput { display: none; }
+</style>
+
+<div class="topbar">
+  <div class="topbar-brand">
+    <div class="brand-sigil">{}</div>
+    <div>
+      <div class="brand-name">luau-min</div>
+      <div class="brand-ver">v1.0.0</div>
+    </div>
+  </div>
+
+  <div class="topbar-opts">
+    <label class="opt-toggle on" id="togLine">
+      <input type="checkbox" id="optLine" checked>
+      <span class="opt-dot"></span>
+      line comments
+    </label>
+    <label class="opt-toggle on" id="togBlock">
+      <input type="checkbox" id="optBlock" checked>
+      <span class="opt-dot"></span>
+      block comments
+    </label>
+    <label class="opt-toggle on" id="togWS">
+      <input type="checkbox" id="optWS" checked>
+      <span class="opt-dot"></span>
+      whitespace
+    </label>
+    <label class="opt-toggle on" id="togSingle">
+      <input type="checkbox" id="optSingle" checked>
+      <span class="opt-dot"></span>
+      single line
+    </label>
+  </div>
+
+  <div class="topbar-actions">
+    <button class="tbtn" id="loadBtn">
+      <svg viewBox="0 0 14 14" fill="none"><path d="M2 9v3h10V9M7 2v7M4 6l3 3 3-3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      Open
+    </button>
+    <button class="tbtn" id="copyBtn" disabled>
+      <svg viewBox="0 0 14 14" fill="none"><rect x="4" y="4" width="7" height="7" rx="1" stroke="currentColor" stroke-width="1.3"/><path d="M3 10V2h8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+      Copy
+    </button>
+    <button class="tbtn primary" id="runBtn">
+      <svg viewBox="0 0 14 14" fill="none"><path d="M3 7h8M8 4l3 3-3 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      Minify
+    </button>
+  </div>
+</div>
+
+<div class="workspace">
+  <!-- INPUT PANEL -->
+  <div class="panel" id="inputPanel">
+    <div class="panel-bar">
+      <span class="panel-label">source</span>
+      <span class="panel-stats"><span class="hi" id="inLines">0</span> ln · <span class="hi" id="inChars">0</span> ch</span>
+    </div>
+    <div class="editor-wrap" id="inputWrap">
+      <div class="gutter" id="gutter" aria-hidden="true">1</div>
+      <textarea id="inputArea" spellcheck="false" placeholder="-- paste .lua / .luau here
+-- or drag-and-drop a file
+
+local function hello(name)
+    -- say hello
+    print(&quot;Hello, &quot; .. name)
+end"></textarea>
+      <div class="drop-overlay" id="dropZone">
+        <div class="drop-icon">↓</div>
+        <div class="drop-label">drop file</div>
+        <div class="drop-sub">.lua · .luau · .txt</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- OUTPUT PANEL -->
+  <div class="panel">
+    <div class="panel-bar">
+      <span class="panel-label">output</span>
+      <span class="panel-stats"><span class="hi" id="outLines">—</span> ln · <span class="hi" id="outChars">—</span> ch</span>
+    </div>
+    <div class="editor-wrap">
+      <textarea id="outputArea" readonly spellcheck="false" placeholder="-- minified output"></textarea>
+    </div>
+  </div>
+</div>
+
+<!-- Status bar -->
+<div class="statusbar">
+  <div class="sbitem">
+    <span>saved</span>
+    <span class="val green" id="sbPct">—</span>
+  </div>
+  <div class="meter-wrap">
+    <div class="meter-track"><div class="meter-fill" id="meterFill"></div></div>
+    <span class="meter-pct" id="meterPct">0%</span>
+  </div>
+  <div class="sbitem">
+    <span>in</span>
+    <span class="val amber" id="sbInBytes">0 B</span>
+  </div>
+  <div class="sbitem">
+    <span>out</span>
+    <span class="val" id="sbOutBytes">—</span>
+  </div>
+  <div class="sbitem sbright">luau-min · string-aware</div>
+</div>
+
+<div class="toast" id="toast"></div>
+<input type="file" id="fileInput" accept=".lua,.luau,.txt">
+
+<script>
+const inputArea  = document.getElementById('inputArea');
+const outputArea = document.getElementById('outputArea');
+const gutter     = document.getElementById('gutter');
+const runBtn     = document.getElementById('runBtn');
+const copyBtn    = document.getElementById('copyBtn');
+const loadBtn    = document.getElementById('loadBtn');
+const fileInput  = document.getElementById('fileInput');
+const dropZone   = document.getElementById('dropZone');
+const inputWrap  = document.getElementById('inputWrap');
+const toast      = document.getElementById('toast');
+
+// ── Toggle chips ──
+['togLine','togBlock','togWS','togSingle'].forEach(id => {
+  const el = document.getElementById(id);
+  const cb = el.querySelector('input');
+  el.addEventListener('click', e => {
+    e.preventDefault();
+    cb.checked = !cb.checked;
+    el.classList.toggle('on', cb.checked);
+  });
+});
+
+function opts() {
+  return {
+    line:   document.getElementById('optLine').checked,
+    block:  document.getElementById('optBlock').checked,
+    ws:     document.getElementById('optWS').checked,
+    single: document.getElementById('optSingle').checked,
+  };
+}
+
+// ── Minifier core ──
+function minify(src, o) {
+  if (o.block) src = src.replace(/--\[=*\[[\s\S]*?\]=*\]/g, '');
+
+  if (o.line) {
+    src = src.split('\n').map(line => {
+      let out = '', i = 0;
+      while (i < line.length) {
+        const c = line[i];
+        if (c === '"' || c === "'") {
+          let s = c; i++;
+          while (i < line.length) {
+            const sc = line[i]; s += sc;
+            if (sc === '\\') { i++; if (i < line.length) s += line[i]; }
+            else if (sc === c) break;
+            i++;
+          }
+          out += s; i++; continue;
+        }
+        if (c === '-' && line[i+1] === '-') break;
+        out += c; i++;
+      }
+      return out.trimEnd();
+    }).join('\n');
+  }
+
+  if (o.ws || o.single) {
+    let lines = src.split('\n').filter(l => l.trim());
+    if (o.single) {
+      src = lines.map(l => l.trim()).join(' ').replace(/ {2,}/g, ' ');
+    } else {
+      src = lines.map(l => l.replace(/[ \t]{2,}/g, ' ')).join('\n');
+    }
+  }
+  return src.trim();
+}
+
+// ── Gutter sync ──
+function updateGutter() {
+  const lines = inputArea.value ? inputArea.value.split('\n').length : 1;
+  let html = '';
+  for (let i = 1; i <= lines; i++) html += i + '\n';
+  gutter.textContent = html;
+}
+
+inputArea.addEventListener('scroll', () => { gutter.scrollTop = inputArea.scrollTop; });
+inputArea.addEventListener('input', () => { updateGutter(); updateInStats(); scheduleRun(); });
+
+// ── Stats ──
+function fmtBytes(n) {
+  if (n >= 1048576) return (n/1048576).toFixed(1) + ' MB';
+  if (n >= 1024) return (n/1024).toFixed(1) + ' KB';
+  return n + ' B';
+}
+function fmtN(n) {
+  if (n >= 1000000) return (n/1000000).toFixed(1)+'M';
+  if (n >= 1000) return (n/1000).toFixed(1)+'K';
+  return String(n);
+}
+function byteLen(s) { return new TextEncoder().encode(s).length; }
+
+function updateInStats() {
+  const v = inputArea.value;
+  const lines = v ? v.split('\n').length : 0;
+  document.getElementById('inLines').textContent = fmtN(lines);
+  document.getElementById('inChars').textContent = fmtN(v.length);
+  document.getElementById('sbInBytes').textContent = fmtBytes(byteLen(v));
+}
+
+function updateOutStats(inLen, out) {
+  if (!out) {
+    document.getElementById('outLines').textContent = '—';
+    document.getElementById('outChars').textContent = '—';
+    document.getElementById('sbOutBytes').textContent = '—';
+    document.getElementById('sbPct').textContent = '—';
+    document.getElementById('meterFill').style.width = '0%';
+    document.getElementById('meterPct').textContent = '0%';
+    return;
+  }
+  const outLines = out.split('\n').length;
+  document.getElementById('outLines').textContent = fmtN(outLines);
+  document.getElementById('outChars').textContent = fmtN(out.length);
+  document.getElementById('sbOutBytes').textContent = fmtBytes(byteLen(out));
+  const pct = inLen > 0 ? Math.max(0, ((inLen - out.length)/inLen*100)) : 0;
+  const pctStr = pct.toFixed(1) + '%';
+  document.getElementById('sbPct').textContent = pctStr;
+  document.getElementById('meterFill').style.width = Math.min(100, pct) + '%';
+  document.getElementById('meterPct').textContent = pctStr;
+}
+
+// ── Run ──
+function run() {
+  const src = inputArea.value;
+  if (!src.trim()) return;
+  const result = minify(src, opts());
+  outputArea.value = result;
+  copyBtn.disabled = false;
+  updateOutStats(src.length, result);
+}
+
+runBtn.addEventListener('click', () => { run(); showToast('minified'); });
+
+let timer;
+function scheduleRun() {
+  clearTimeout(timer);
+  timer = setTimeout(() => {
+    if (inputArea.value.trim()) run();
+    else { outputArea.value = ''; copyBtn.disabled = true; updateOutStats(0, null); }
+  }, 350);
+}
+
+// ── Copy ──
+copyBtn.addEventListener('click', () => {
+  const t = outputArea.value; if (!t) return;
+  navigator.clipboard.writeText(t)
+    .then(() => showToast('copied'))
+    .catch(() => { outputArea.select(); showToast('select + copy manually'); });
+});
+
+// ── File load ──
+loadBtn.addEventListener('click', () => fileInput.click());
+fileInput.addEventListener('change', () => { if (fileInput.files[0]) load(fileInput.files[0]); fileInput.value=''; });
+
+function load(file) {
+  const r = new FileReader();
+  r.onload = e => { inputArea.value = e.target.result; updateGutter(); updateInStats(); run(); showToast('loaded: ' + file.name); };
+  r.readAsText(file);
+}
+
+inputWrap.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('active'); });
+inputWrap.addEventListener('dragleave', e => { if (!inputWrap.contains(e.relatedTarget)) dropZone.classList.remove('active'); });
+inputWrap.addEventListener('drop', e => { e.preventDefault(); dropZone.classList.remove('active'); if (e.dataTransfer.files[0]) load(e.dataTransfer.files[0]); });
+
+// ── Toast ──
+let toastTimer;
+function showToast(msg) {
+  toast.textContent = '> ' + msg;
+  toast.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => toast.classList.remove('show'), 1600);
+}
+
+// ── Init ──
+updateGutter();
+updateInStats();
+</script>
+
+</body></html>
